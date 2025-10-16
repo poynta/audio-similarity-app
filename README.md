@@ -9,6 +9,7 @@ Windows: Open Command Prompt or PowerShell.
 Run this command
 
 git clone https://github.com/poynta/audio_similarity-app.git
+
 cd audio_sim
 
 
