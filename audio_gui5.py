@@ -10,6 +10,7 @@ FreeSimpleGUI GUI for Audio Similarity app (macOS)
 """
 
 import os
+import sys
 import tempfile
 import subprocess
 import threading
@@ -17,6 +18,7 @@ import time
 import pickle
 import hashlib
 from pathlib import Path
+import queue
 
 import numpy as np
 import FreeSimpleGUI as sg
@@ -30,8 +32,30 @@ FONT_TABLE = ("Helvetica", 12)
 AUDIO_EXTS = [".wav", ".flac", ".aiff", ".mp3"]
 SEGMENT_SECONDS = 20
 BATCH_TRACKS = 3
-FAISS_INDEX_FILE = "index.faiss"
-META_FILE = "index_meta.pkl"
+
+# Persistent, writable app data directory (works in PyInstaller bundles)
+def get_app_data_dir() -> Path:
+    base = os.environ.get("AUDIO_SIM_DATA_DIR")
+    if base:
+        p = Path(base)
+    else:
+        # macOS: ~/Library/Application Support/AudioSimilarity
+        if sys.platform == "darwin":
+            p = Path.home() / "Library" / "Application Support" / "AudioSimilarity"
+        # Linux: ~/.local/share/AudioSimilarity
+        elif sys.platform.startswith("linux"):
+            p = Path.home() / ".local" / "share" / "AudioSimilarity"
+        # Windows: %APPDATA%/AudioSimilarity
+        elif os.name == "nt":
+            p = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "AudioSimilarity"
+        else:
+            p = Path.home() / ".audio_similarity"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+APP_DATA_DIR = get_app_data_dir()
+FAISS_INDEX_FILE = APP_DATA_DIR / "index.faiss"
+META_FILE = APP_DATA_DIR / "index_meta.pkl"
 
 # ---------------- GUI Layout ----------------
 results_headings = ["Rank", "Track", "Similarity (%)", "FullPath"]  # last column hidden
@@ -39,26 +63,28 @@ results_headings = ["Rank", "Track", "Similarity (%)", "FullPath"]  # last colum
 layout = [
     [sg.Text("Index Audio Folder:", font=FONT_LARGE),
      sg.Input(key="-FOLDER-", expand_x=True, font=FONT_LARGE),
-     sg.FolderBrowse(font=FONT_LARGE), sg.Button("Index", font=FONT_LARGE)],
+     sg.FolderBrowse(font=FONT_LARGE), sg.Button("Index", key="-BTN-INDEX-", font=FONT_LARGE, disabled=True)],
 
     [sg.Text("Progress:", font=FONT_LARGE),
      sg.Text("", key="-CURRENT_FILE-", size=(60,1), expand_x=True, font=FONT_LARGE)],
 
     [sg.ProgressBar(max_value=1, orientation='h', key="-PROGRESS-", expand_x=True)],
 
-    [sg.Button("Pause", font=FONT_LARGE), sg.Button("Continue", font=FONT_LARGE)],
+    [sg.Button("Pause", key="-BTN-PAUSE-", font=FONT_LARGE, disabled=True),
+     sg.Button("Continue", key="-BTN-CONTINUE-", font=FONT_LARGE, disabled=True)],
 
     # Search input + listbox
     [sg.Text("Search Indexed Track:", font=FONT_LARGE)],
     [sg.Input(key="-INDEX_SEARCH_INPUT-", size=(60,1), enable_events=True, font=FONT_LARGE)],
     [sg.Listbox(values=[], key="-INDEX_MATCHES-", size=(80,6), enable_events=True, font=FONT_TABLE)],
-    [sg.Button("Query Indexed", font=FONT_LARGE)],
+    [sg.Button("Query Indexed", key="-BTN-QUERY-IDX-", font=FONT_LARGE, disabled=True)],
 
     # External file query
     [sg.Text("Query External File:", font=FONT_LARGE),
      sg.Input(key="-QUERY-", expand_x=True, font=FONT_LARGE),
      sg.FileBrowse(font=FONT_LARGE),
-     sg.Input(default_text="5", size=(5,1), key="-K-", font=FONT_LARGE), sg.Button("Query", font=FONT_LARGE)],
+     sg.Input(default_text="5", size=(5,1), key="-K-", font=FONT_LARGE),
+     sg.Button("Query", key="-BTN-QUERY-", font=FONT_LARGE, disabled=True)],
 
     [sg.Table(values=[], headings=results_headings, key="-RESULTS-",
               expand_x=True, expand_y=True, auto_size_columns=False,
@@ -66,7 +92,7 @@ layout = [
               right_click_menu=["", ["Query This Track", "Show in Folder"]],
               font=FONT_TABLE)],
 
-    [sg.Button("Clear Index", font=FONT_LARGE)]
+    [sg.Button("Clear Index", key="-BTN-CLEAR-", font=FONT_LARGE, disabled=True)]
 ]
 
 window = sg.Window("Audio Similarity (CLAP + FAISS) — Searchable Index", layout, resizable=True, finalize=True)
@@ -78,16 +104,33 @@ filenames = []       # full paths
 hashes = []          # sha1 hashes
 display_names = []   # cached display names
 faiss_index = None
+model = None
 
-# ---------------- Initialize CLAP Model ----------------
-window["-CURRENT_FILE-"].update("Loading CLAP model (this may take a moment)...")
-window.refresh()
-model = CLAP_Module(enable_fusion=False)
-model.load_ckpt()
-window["-CURRENT_FILE-"].update("CLAP model ready.")
-window.refresh()
-time.sleep(0.6)
-window["-CURRENT_FILE-"].update("")
+# Thread-safe UI event key and queue fallback
+UI_EVENT_KEY = "-THREAD-UI-"
+ui_queue: "queue.Queue[tuple]" = queue.Queue()
+
+def post_ui(action: str, **payload):
+    """Post a UI action to the main thread."""
+    try:
+        # Prefer write_event_value when available (thread-safe)
+        window.write_event_value(UI_EVENT_KEY, (action, payload))
+    except Exception:
+        ui_queue.put((action, payload))
+
+# ---------------- Initialize CLAP Model (background) ----------------
+def _load_model_thread():
+    global model
+    try:
+        post_ui("status", text="Loading CLAP model (this may take a moment)...")
+        m = CLAP_Module(enable_fusion=False)
+        m.load_ckpt()
+        model = m
+        window.write_event_value("-MODEL-READY-", True)
+    except Exception as e:
+        window.write_event_value("-MODEL-ERROR-", str(e))
+
+threading.Thread(target=_load_model_thread, daemon=True).start()
 
 # ---------------- Helpers ----------------
 def get_metadata_display(path):
@@ -106,13 +149,13 @@ def save_meta_and_index(filenames_list, hashes_list, embeddings_list, index):
     with open(META_FILE, "wb") as f:
         pickle.dump(meta, f)
     if index:
-        faiss.write_index(index, FAISS_INDEX_FILE)
+        faiss.write_index(index, str(FAISS_INDEX_FILE))
 
 def load_meta_and_index():
     if Path(META_FILE).exists() and Path(FAISS_INDEX_FILE).exists():
         with open(META_FILE, "rb") as f:
             meta = pickle.load(f)
-        index = faiss.read_index(FAISS_INDEX_FILE)
+        index = faiss.read_index(str(FAISS_INDEX_FILE))
         emb_list = meta.get("embeddings", [])
         emb_list = [np.array(e, dtype=np.float32) for e in emb_list]
         filenames_list = list(meta.get("files", []))
@@ -129,6 +172,17 @@ def create_faiss_index(dim):
 
 def update_index_search_list():
     window["-INDEX_MATCHES-"].update(values=display_names)
+
+def reveal_in_file_manager(path: Path):
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["open", "-R", str(path)], check=False)
+        elif sys.platform.startswith("linux"):
+            subprocess.run(["xdg-open", str(path.parent)], check=False)
+        elif os.name == "nt":
+            subprocess.run(["explorer", "/select,", str(path)], check=False)
+    except Exception:
+        pass
 
 # ---------------- Audio segmentation ----------------
 def get_audio_duration(path):
@@ -193,17 +247,17 @@ def index_folder_thread(folder_path):
     global filenames, hashes, display_names, embeddings_all, faiss_index
     folder = Path(folder_path)
     if not folder.exists():
-        window["-CURRENT_FILE-"].update(f"Folder not found: {folder}")
+        post_ui("status", text=f"Folder not found: {folder}")
         return
 
     files = [f for ext in AUDIO_EXTS for f in sorted(folder.rglob(f"*{ext}"))]
     if not files:
-        window["-CURRENT_FILE-"].update("No audio files found")
+        post_ui("status", text="No audio files found")
         return
 
     total = len(files)
     indexing_state.update({"total_files": total, "running": True, "current_index": 0})
-    window["-PROGRESS-"].update(current_count=0, max=total)
+    post_ui("progress", current=0, max=total)
 
     if faiss_index is None and embeddings_all:
         dim = embeddings_all[0].shape[0]
@@ -221,14 +275,14 @@ def index_folder_thread(folder_path):
         to_process = []
         for f in batch_files:
             try:
-                with open(f, "rb") as fh:
+        with open(f, "rb") as fh:
                     f_hash = hashlib.sha1(fh.read()).hexdigest()
             except Exception:
                 f_hash = None
             if f_hash and (str(f) in filenames or f_hash in hashes):
                 skipped += 1
-                window["-CURRENT_FILE-"].update(f"Skipping: {f.name}")
-                window["-PROGRESS-"].update(current_count=i + 1)
+                post_ui("status", text=f"Skipping: {f.name}")
+                post_ui("progress", current=i + 1, max=total)
                 i += 1
                 continue
             to_process.append((f, f_hash))
@@ -281,15 +335,15 @@ def index_folder_thread(folder_path):
             display_names.append(get_metadata_display(f))
             embeddings_all.append(emb.astype(np.float32))
             processed += 1
-            window["-CURRENT_FILE-"].update(f"Indexed: {f.name}")
-            window["-PROGRESS-"].update(current_count=min(i + 1, total))
+            post_ui("status", text=f"Indexed: {f.name}")
+            post_ui("progress", current=min(i + 1, total), max=total)
             i += 1
 
     save_meta_and_index(filenames, hashes, embeddings_all, faiss_index)
-    update_index_search_list()
     indexing_state["running"] = False
-    window["-CURRENT_FILE-"].update(f"Indexing complete: processed={processed}, skipped={skipped}, failed={failed}")
-    window["-PROGRESS-"].update(current_count=total)
+    post_ui("rebuild_index_list")
+    post_ui("status", text=f"Indexing complete: processed={processed}, skipped={skipped}, failed={failed}")
+    post_ui("progress", current=total, max=total)
 
 def start_indexing(folder_path):
     if indexing_state["running"]:
@@ -298,49 +352,56 @@ def start_indexing(folder_path):
 
 # ---------------- Query helpers ----------------
 def query_file_gui_external(file_path, top_k):
-    if faiss_index is None or not filenames:
-        window["-CURRENT_FILE-"].update("Index is empty. Please index first.")
-        return
+    """Run external query in a background thread and post results to UI."""
+    def _thread():
+        if faiss_index is None or not filenames:
+            post_ui("status", text="Index is empty. Please index first.")
+            return
+        if model is None:
+            post_ui("status", text="Model not ready yet.")
+            return
+        segs = make_segments_for_file(str(file_path))
+        if segs:
+            emb_list = model.get_audio_embedding_from_filelist(segs, use_tensor=False)
+            cleanup_temp_files(segs)
+            vecs = [np.array(e, dtype=np.float32) / (np.linalg.norm(e) + 1e-9) for e in emb_list]
+            query_vec = np.mean(vecs, axis=0)
+        else:
+            emb = model.get_audio_embedding_from_filelist([str(file_path)], use_tensor=False)[0]
+            query_vec = np.array(emb, dtype=np.float32) / (np.linalg.norm(emb) + 1e-9)
 
-    segs = make_segments_for_file(str(file_path))
-    if segs:
-        emb_list = model.get_audio_embedding_from_filelist(segs, use_tensor=False)
-        cleanup_temp_files(segs)
-        vecs = [np.array(e, dtype=np.float32) / (np.linalg.norm(e) + 1e-9) for e in emb_list]
-        query_vec = np.mean(vecs, axis=0)
-    else:
-        emb = model.get_audio_embedding_from_filelist([str(file_path)], use_tensor=False)[0]
-        query_vec = np.array(emb, dtype=np.float32) / (np.linalg.norm(emb) + 1e-9)
-
-    query_vec /= (np.linalg.norm(query_vec) + 1e-9)
-    D, I = faiss_index.search(np.expand_dims(query_vec.astype(np.float32), axis=0), top_k)
-    results = []
-    for sim, idx in zip(D[0], I[0]):
-        if idx < 0 or idx >= len(filenames):
-            continue
-        path = filenames[idx]
-        results.append([len(results)+1, Path(path).name, f"{sim*100:.1f}%", path])
-    window["-RESULTS-"].update(values=results)
+        query_vec /= (np.linalg.norm(query_vec) + 1e-9)
+        D, I = faiss_index.search(np.expand_dims(query_vec.astype(np.float32), axis=0), top_k)
+        results = []
+        for sim, idx in zip(D[0], I[0]):
+            if idx < 0 or idx >= len(filenames):
+                continue
+            path = filenames[idx]
+            results.append([len(results)+1, Path(path).name, f"{sim*100:.1f}%", path])
+        post_ui("results", rows=results)
+    threading.Thread(target=_thread, daemon=True).start()
 
 def query_file_gui_indexed_by_idx(idx, top_k):
-    if faiss_index is None or not filenames:
-        window["-CURRENT_FILE-"].update("Index is empty.")
-        return
-    try:
-        vec = np.empty((faiss_index.d,), dtype='float32')
-        faiss_index.reconstruct(idx, vec)
-        query_vec = vec / (np.linalg.norm(vec) + 1e-9)
-    except Exception:
-        query_vec = embeddings_all[idx] / (np.linalg.norm(embeddings_all[idx]) + 1e-9)
-    D, I = faiss_index.search(np.expand_dims(query_vec.astype(np.float32), axis=0), top_k+1)
-    results = []
-    for sim, i_idx in zip(D[0], I[0]):
-        if i_idx == idx or i_idx < 0 or i_idx >= len(filenames):
-            continue
-        results.append([len(results)+1, Path(filenames[i_idx]).name, f"{sim*100:.1f}%", filenames[i_idx]])
-        if len(results) >= top_k:
-            break
-    window["-RESULTS-"].update(values=results)
+    def _thread():
+        if faiss_index is None or not filenames:
+            post_ui("status", text="Index is empty.")
+            return
+        try:
+            vec = np.empty((faiss_index.d,), dtype='float32')
+            faiss_index.reconstruct(idx, vec)
+            query_vec = vec / (np.linalg.norm(vec) + 1e-9)
+        except Exception:
+            query_vec = embeddings_all[idx] / (np.linalg.norm(embeddings_all[idx]) + 1e-9)
+        D, I = faiss_index.search(np.expand_dims(query_vec.astype(np.float32), axis=0), top_k+1)
+        results = []
+        for sim, i_idx in zip(D[0], I[0]):
+            if i_idx == idx or i_idx < 0 or i_idx >= len(filenames):
+                continue
+            results.append([len(results)+1, Path(filenames[i_idx]).name, f"{sim*100:.1f}%", filenames[i_idx]])
+            if len(results) >= top_k:
+                break
+        post_ui("results", rows=results)
+    threading.Thread(target=_thread, daemon=True).start()
 
 def query_file_gui_indexed(selected_name, top_k):
     matched_idx = None
@@ -369,18 +430,26 @@ def clear_index():
 
 # ---------------- Event loop ----------------
 while True:
+    # Drain fallback UI queue if used
+    try:
+        while True:
+            action, payload = ui_queue.get_nowait()
+            window.write_event_value(UI_EVENT_KEY, (action, payload))
+    except Exception:
+        pass
+
     event, values = window.read(timeout=100)
     if event == sg.WINDOW_CLOSED:
         break
-    elif event == "Index":
+    elif event in ("Index", "-BTN-INDEX-"):
         folder = values["-FOLDER-"]
         if folder:
             start_indexing(folder)
         else:
             window["-CURRENT_FILE-"].update("Please select a folder.")
-    elif event == "Pause":
+    elif event in ("Pause", "-BTN-PAUSE-"):
         indexing_state["paused"] = True
-    elif event == "Continue":
+    elif event in ("Continue", "-BTN-CONTINUE-"):
         indexing_state["paused"] = False
     elif event == "-INDEX_SEARCH_INPUT-":
         q = values.get("-INDEX_SEARCH_INPUT-", "").strip().lower()
@@ -390,7 +459,7 @@ while True:
         sel = values.get("-INDEX_MATCHES-")
         if sel:
             window["-INDEX_SEARCH_INPUT-"].update(sel[0])
-    elif event == "Query":
+    elif event in ("Query", "-BTN-QUERY-"):
         file = values["-QUERY-"]
         if not file:
             continue
@@ -399,7 +468,7 @@ while True:
         except ValueError:
             k = 5
         query_file_gui_external(file, k)
-    elif event == "Query Indexed":
+    elif event in ("Query Indexed", "-BTN-QUERY-IDX-"):
         sel_list = values.get("-INDEX_MATCHES-")
         sel_name = sel_list[0] if sel_list else values.get("-INDEX_SEARCH_INPUT-", "").strip()
         if not sel_name:
@@ -410,7 +479,7 @@ while True:
         except ValueError:
             k = 5
         query_file_gui_indexed(sel_name, k)
-    elif event == "Clear Index":
+    elif event in ("Clear Index", "-BTN-CLEAR-"):
         threading.Thread(target=clear_index, daemon=True).start()
     elif event in ["Query This Track", "Show in Folder"]:
         sel_rows = values["-RESULTS-"]
@@ -430,7 +499,37 @@ while True:
                     k = 5
                 query_file_gui_indexed_by_idx(idx, k)
         elif event == "Show in Folder":
-            if Path(full_path).exists():
-                subprocess.run(["open", Path(full_path).parent])
+            p = Path(full_path)
+            if p.exists():
+                reveal_in_file_manager(p)
+    elif event == UI_EVENT_KEY:
+        try:
+            action, payload = values.get(UI_EVENT_KEY, (None, {}))
+        except Exception:
+            action, payload = (None, {})
+        if action == "status":
+            window["-CURRENT_FILE-"].update(payload.get("text", ""))
+        elif action == "results":
+            rows = payload.get("rows", [])
+            window["-RESULTS-"].update(values=rows)
+        elif action == "progress":
+            cur = payload.get("current", 0)
+            mx = payload.get("max", 1)
+            window["-PROGRESS-"].update(current_count=cur, max=mx)
+        elif action == "rebuild_index_list":
+            update_index_search_list()
+    elif event == "-MODEL-READY-":
+        window["-CURRENT_FILE-"].update("CLAP model ready.")
+        for key in ("-BTN-INDEX-", "-BTN-PAUSE-", "-BTN-CONTINUE-", "-BTN-QUERY-IDX-", "-BTN-QUERY-", "-BTN-CLEAR-"):
+            try:
+                window[key].update(disabled=False)
+            except Exception:
+                pass
+        window.refresh()
+        time.sleep(0.4)
+        window["-CURRENT_FILE-"].update("")
+    elif event == "-MODEL-ERROR-":
+        err = values.get("-MODEL-ERROR-", "Unknown error loading model")
+        sg.popup_error(f"Error loading CLAP model:\n{err}")
 
 window.close()
