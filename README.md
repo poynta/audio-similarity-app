@@ -6,10 +6,10 @@ Windows: Open Command Prompt or PowerShell.
 
 2️⃣ Download the GitHub repo
 
-Run this command (replace the URL with your repo’s actual GitHub URL):
+Run this command
 
-git clone https://github.com/yourusername/audio_similarity.git
-cd audio_similarity
+git clone https://github.com/poynta/audio_similarity-app.git
+cd audio_sim
 
 
 This downloads the project to your computer and moves into the folder.
