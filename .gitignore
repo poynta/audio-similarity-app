@@ -1,0 +1,62 @@
+# macOS junk
+.DS_Store
+
+# Virtual environment
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Large model/index files
+index.faiss
+index_meta.pkl
+
+# Audio files
+*.mp3
+*.wav
+*.flac
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# PyInstaller cache
+*.log
+*.pkg
+*.app
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# macOS system files
+.DS_Store
+
+# IDE / editor stuff
+.vscode/
+*.code-workspace
+
+# Audio index / cache
+faiss.index
+index_embeddings.pkl
+meta.json
+
+# Model checkpoints
+*.pt
+*.safetensors
+*.bin
+
+# Temporary files
+tmp/
+cache/
+logs/
