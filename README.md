@@ -1,7 +1,8 @@
-Audio Similarity App — Quick Start
-1️⃣ Open Terminal
+1️⃣ Open Terminal / Command Prompt
 
-On macOS, open the Terminal app.
+macOS: Open Terminal.
+
+Windows: Open Command Prompt or PowerShell.
 
 2️⃣ Download the GitHub repo
 
@@ -13,13 +14,19 @@ cd audio_similarity
 
 This downloads the project to your computer and moves into the folder.
 
-3️⃣ Install requirements
-
-If you haven’t already, create a virtual environment (optional, but recommended) and install dependencies:
-
+3️⃣ Install Python and dependencies
+macOS:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+Windows (PowerShell):
+python -m venv .venv
+.venv\Scripts\Activate.ps1   # or use .venv\Scripts\activate.bat for cmd
+pip install -r requirements.txt
+
+
+⚠️ Make sure Python 3.10+ is installed.
 
 4️⃣ Run the app
 
@@ -51,7 +58,7 @@ Click Start Indexing.
 
 Wait for it to finish — you’ll see a progress update.
 
-7️⃣ Search/query audio
+7️⃣ Search / Query audio
 
 Switch to the “Query / Upload” tab.
 
@@ -62,3 +69,5 @@ Upload a file to search for similar tracks in the index, or
 Type a track name from the index to query it.
 
 View the results directly in the table.
+
+💡 Tip: Start with a small folder of 5–10 tracks to make sure everything works before indexing a large library.
