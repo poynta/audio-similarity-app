@@ -7,45 +7,52 @@ Windows: Open Command Prompt or PowerShell.
 2️⃣ Download the GitHub repo
 
 Run this command
-
+--------------------
 git clone https://github.com/poynta/audio_similarity-app.git
-
 cd audio_sim
-
+--------------------
 
 This downloads the project to your computer and moves into the folder.
 
 3️⃣ Install Python and dependencies
 macOS:
+--------------------
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+--------------------
+
 
 Windows (PowerShell):
+--------------------
 python -m venv .venv
 .venv\Scripts\Activate.ps1   # or use .venv\Scripts\activate.bat for cmd
 pip install -r requirements.txt
-
+--------------------
 
 ⚠️ Make sure Python 3.10+ is installed.
+
 
 4️⃣ Run the app
 
 Start the app with:
 
+--------------------
 python audio_web_tabs.py
-
+--------------------
 
 You should see something like:
 
 * Running on local URL:  http://127.0.0.1:7860
 
+
 5️⃣ Open the app in your browser
 
 Open a web browser and go to:
 
+--------------------
 http://127.0.0.1:7860
-
+--------------------
 
 This is your local app interface.
 
