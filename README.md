@@ -57,6 +57,7 @@ Now go into that folder:
 cd audio-similarity-app
 
 🧙‍♂️ 5. Create a virtual environment (so your dependencies don’t mess with system Python)
+
 python3 -m venv .venv
 
 
@@ -92,7 +93,7 @@ numpy and others
 
 In the same Terminal (while .venv is active):
 
-python3 audio_gui5.py
+python3 audio_gui6.py
 
 
 After a few seconds, a window will open titled:
@@ -107,7 +108,7 @@ Click “Browse” and select a folder containing a few audio files (start small
 
 Then click “Index”.
 
-Wait for it to finish — progress shows at the bottom.
+Wait for it to finish
 
 Search Indexed Track
 
@@ -150,7 +151,7 @@ If you’ve already installed everything once, next time you just need to:
 
 cd ~/Desktop/audio-similarity-app
 source .venv/bin/activate
-python3 audio_gui5.py
+python3 audio_gui6.py
 
 🪄 Optional: Update the app from GitHub
 
